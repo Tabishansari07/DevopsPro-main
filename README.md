@@ -39,6 +39,3 @@ curl http://localhost:8080/health
     └── docker-publish.yml # CI/CD pipeline definition
 ```
 
-## Course
-
-INT332 — DevOps Virtualization and Configuration Management
