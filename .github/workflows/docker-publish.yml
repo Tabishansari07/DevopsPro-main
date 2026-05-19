@@ -1,0 +1,122 @@
+name: Docker CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # ─── Job 1: Build & Test ────────────────────────────────────────────────────
+  build-and-test:
+    name: Build and Test (Maven)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run Unit Tests with Maven
+        working-directory: ./app
+        run: mvn test
+
+      - name: Build JAR with Maven
+        working-directory: ./app
+        run: mvn clean package -DskipTests
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: app/target/*.jar
+
+  # ─── Job 2: Docker Build & Push ─────────────────────────────────────────────
+  docker-build-push:
+    name: Build Docker Image and Push to Docker Hub
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Docker Metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/devops-cicd-demo
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Job 3: Verify Deployment ───────────────────────────────────────────────
+  verify-deployment:
+    name: Verify Container Runs Correctly
+    runs-on: ubuntu-latest
+    needs: docker-build-push
+
+    steps:
+      - name: Pull Docker Image from Docker Hub
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/devops-cicd-demo:latest
+
+      - name: Run Container
+        run: |
+          docker run -d --name test-container \
+            -p 8080:8080 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/devops-cicd-demo:latest
+
+      - name: Wait for Application to Start
+        run: |
+          echo "Waiting for Spring Boot to start..."
+          for i in {1..12}; do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Application is up!"
+              break
+            fi
+            echo "Attempt $i/12 — waiting 5s..."
+            sleep 5
+          done
+
+      - name: Verify Application Health
+        run: |
+          RESPONSE=$(curl -sf http://localhost:8080/health)
+          echo "Health response: $RESPONSE"
+          echo "$RESPONSE" | grep '"status":"UP"'
+          echo "✅ Container health check passed!"
+
+      - name: Show Application Home Response
+        run: curl -s http://localhost:8080/
+
+      - name: Stop and Remove Test Container
+        if: always()
+        run: |
+          docker stop test-container || true
+          docker rm test-container   || true
